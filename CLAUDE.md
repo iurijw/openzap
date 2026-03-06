@@ -29,7 +29,6 @@ Um único container, sem dependências externas (sem banco, sem Redis, sem paine
     ├── whatsapp.js            # Conexão Baileys, QR code, reconexão, socket global
     ├── router.js              # Filtra msg → resolve role → áudio/imagem → debounce → orquestra
     ├── agent.js               # Loop de tool use Anthropic Claude (max 10 iterações)
-    ├── oauth.js               # OAuth 2.0 — autorização Claude Pro/Max via assinatura
     ├── config.js              # Env vars, resolveRole(), prompts dinâmicos
     ├── memory.js              # Histórico por contato em JSON (1 arquivo por telefone)
     ├── cron.js                # Gerenciador de cron: daemon, jobs, polling de triggers
@@ -232,46 +231,15 @@ O cron do Linux usa **UTC** por padrão dentro do container.
 
 Apenas `auth/`, `config.json`, `memory/`, `tmp/`, `cron_jobs.json` e `cron_triggers/` têm estrutura definida pelo código. O agente organiza o restante livremente.
 
-## Autenticação Claude (API key vs OAuth)
+## Autenticação Claude
 
-O bot suporta dois modos de autenticação com a Anthropic, que podem coexistir:
-
-### Opção 1: API Key (padrão)
-Configure `ANTHROPIC_API_KEY` no `.env`. Cobrado por uso via API.
-
-### Opção 2: OAuth (assinatura Pro/Max)
-Permite usar sua assinatura Claude Pro/Max em vez de pagar pela API.
-
-**Setup:**
-1. Registre um app OAuth em `https://console.anthropic.com/settings/oauth`
-2. Configure `CLAUDE_OAUTH_CLIENT_ID` (e opcionalmente `CLIENT_SECRET`) no `.env`
-3. Inicie o bot: `docker compose up -d --build`
-4. Envie qualquer mensagem pelo WhatsApp — o bot responde com o link de autorização
-5. Abra o link no navegador e autorize com sua conta Anthropic
-6. O navegador redireciona para uma URL que não carrega (normal)
-7. Copie a URL completa da barra de endereço e envie pelo WhatsApp
-8. Pronto — o bot confirma e começa a funcionar
-
-**Fluxo:**
-```
-Master envia msg → Bot gera auth URL → Master autoriza no browser
-→ Copia callback URL → Cola no WhatsApp → Bot troca code por tokens
-→ Tokens salvos em /data/oauth_tokens.json → Bot operacional
-```
-
-**Comandos:**
-- Enviar `oauth` pelo WhatsApp = gerar nova URL de autorização (para reconfigurar)
-
-**Prioridade de auth:** OAuth tokens > API key > erro.
-Se OAuth expira, o bot tenta refresh automático. Se falhar, usa API key como fallback.
-
-**Tokens persistidos em:** `/data/oauth_tokens.json` (auto-refreshed)
+Configure `ANTHROPIC_API_KEY` no `.env` com sua chave da API Anthropic. Cobrado por uso via API.
 
 ## Variáveis de ambiente (.env)
 
 | Variável              | Obrigatória | Default                      | Descrição                              |
 |-----------------------|-------------|------------------------------|----------------------------------------|
-| `ANTHROPIC_API_KEY`   | Não*        | —                            | Chave da API Anthropic (Claude)        |
+| `ANTHROPIC_API_KEY`   | Sim         | —                            | Chave da API Anthropic (Claude)        |
 | `CLAUDE_MODEL`        | Não         | `claude-sonnet-4-6`             | Modelo Claude para raciocínio          |
 | `OPENAI_API_KEY`      | Não**       | —                            | Chave da API OpenAI (para mídia)       |
 | `OPENAI_MODEL`        | Não         | `gpt-4o`                     | Modelo OpenAI para visão               |
@@ -282,18 +250,6 @@ Se OAuth expira, o bot tenta refresh automático. Se falhar, usa API key como fa
 | `DATA_DIR`            | Não         | `/data`                      | Diretório de dados persistentes        |
 | `LOG_LEVEL`           | Não         | `info`                       | Nível de log (debug, info, warn, error)|
 
-**OAuth (alternativa à API key):**
-
-| Variável                    | Default                                    | Descrição                          |
-|-----------------------------|--------------------------------------------|------------------------------------|
-| `CLAUDE_OAUTH_CLIENT_ID`   | —                                          | Client ID do app OAuth             |
-| `CLAUDE_OAUTH_CLIENT_SECRET`| —                                         | Client Secret (se confidential)    |
-| `CLAUDE_OAUTH_REDIRECT_URI`| `https://localhost/oauth/callback`          | URI de redirecionamento            |
-| `CLAUDE_OAUTH_AUTH_URL`    | `https://auth.anthropic.com/authorize`      | Endpoint de autorização            |
-| `CLAUDE_OAUTH_TOKEN_URL`   | `https://auth.anthropic.com/oauth/token`    | Endpoint de token                  |
-| `CLAUDE_OAUTH_SCOPES`      | `user:inference`                            | Escopos OAuth                      |
-
-*`ANTHROPIC_API_KEY` é obrigatória se OAuth não estiver configurado. Com OAuth, é opcional (usado como fallback).
 **`OPENAI_API_KEY` é necessária apenas para funcionalidades de áudio (Whisper/TTS) e imagem (Vision).
 ***`MASTER_PHONE` é fallback — o sistema usa `master_jid` do config.json como fonte primária.
 

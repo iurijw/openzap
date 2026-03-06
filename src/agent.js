@@ -1,6 +1,5 @@
 const Anthropic = require('@anthropic-ai/sdk').default;
 const { ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_TOOL_ITERATIONS, getSystemPrompt } = require('./config');
-const oauth = require('./oauth');
 const { getHistory, saveHistory } = require('./memory');
 const { dispatchTool, getToolDefinitions } = require('./tools');
 const logger = require('./utils/logger');
@@ -9,65 +8,14 @@ const logger = require('./utils/logger');
 const CONTEXT_WINDOW = 30;
 
 /**
- * Cria um cliente Anthropic usando OAuth (prioridade) ou API key.
- * @returns {Promise<object|null>} Cliente Anthropic ou null se sem auth
+ * Cria um cliente Anthropic usando API key.
+ * @returns {object|null} Cliente Anthropic ou null se sem auth
  */
-async function createClient() {
-    // 1. Tentar OAuth primeiro
-    if (oauth.isConfigured()) {
-        const accessToken = await oauth.getAccessToken();
-        if (accessToken) {
-            logger.debug('Claude auth: OAuth');
-            return new Anthropic({ authToken: accessToken });
-        }
-    }
-
-    // 2. Fallback: API key
+function createClient() {
     if (ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'sk-ant-...') {
-        logger.debug('Claude auth: API key');
         return new Anthropic({ apiKey: ANTHROPIC_API_KEY });
     }
-
     return null;
-}
-
-/**
- * Chama a API Claude com retry automático em caso de token expirado (401).
- * Se OAuth falhar, tenta fallback para API key.
- */
-async function callClaude(params) {
-    let client = await createClient();
-    if (!client) {
-        throw new Error('Nenhuma autenticação Claude configurada');
-    }
-
-    try {
-        return await client.messages.create(params);
-    } catch (err) {
-        // Se 401 e estamos usando OAuth, tentar refresh + retry
-        if (err.status === 401 && oauth.isConfigured()) {
-            logger.warn('Claude 401 — tentando refresh do token OAuth...');
-            try {
-                await oauth.refreshAccessToken();
-                const newToken = await oauth.getAccessToken();
-                if (newToken) {
-                    client = new Anthropic({ authToken: newToken });
-                    return await client.messages.create(params);
-                }
-            } catch (refreshErr) {
-                logger.error({ err: refreshErr }, 'Falha no refresh OAuth');
-            }
-
-            // Fallback final: API key (se disponível)
-            if (ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'sk-ant-...') {
-                logger.warn('OAuth falhou, usando API key como fallback');
-                client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-                return await client.messages.create(params);
-            }
-        }
-
-        throw err;
-    }
 }
 
 /**
@@ -131,6 +79,11 @@ async function runAgent(sender, phone, role, userMessage, { fromCron = false } =
 
     let iterations = 0;
     const tools = getToolDefinitions();
+    const client = createClient();
+
+    if (!client) {
+        return 'Erro: ANTHROPIC_API_KEY não configurada. Configure no .env e reinicie.';
+    }
 
     while (iterations < MAX_TOOL_ITERATIONS) {
         iterations++;
@@ -139,7 +92,7 @@ async function runAgent(sender, phone, role, userMessage, { fromCron = false } =
 
         let response;
         try {
-            response = await callClaude({
+            response = await client.messages.create({
                 model: CLAUDE_MODEL,
                 max_tokens: 8192,
                 system: systemPrompt,

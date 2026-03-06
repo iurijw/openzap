@@ -4,7 +4,6 @@ const path = require('path');
 const { execSync } = require('child_process');
 const { ROLE_MASTER, ROLE_USER, resolveRole, OPENAI_API_KEY, OPENAI_MODEL, ANTHROPIC_API_KEY, DATA_DIR } = require('./config');
 const { runAgent } = require('./agent');
-const oauth = require('./oauth');
 const { debounce } = require('./utils/debounce');
 const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 const logger = require('./utils/logger');
@@ -98,16 +97,6 @@ async function describeImage(imageBuffer, mimetype, caption) {
 }
 
 /**
- * Verifica se há algum método de autenticação Claude disponível.
- * @returns {Promise<boolean>}
- */
-async function hasClaudeAuth() {
-    if (ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'sk-ant-...') return true;
-    if (oauth.isConfigured() && await oauth.hasValidTokens()) return true;
-    return false;
-}
-
-/**
  * Recebe uma mensagem do WhatsApp, identifica o remetente e orquestra a resposta.
  * @param {object} sock - Socket do Baileys
  * @param {object} msg - Mensagem crua do Baileys
@@ -136,55 +125,18 @@ async function handleMessage(sock, msg) {
         || msg.message?.extendedTextMessage?.text
         || '';
 
-    // === FLUXO OAUTH (antes de qualquer processamento de mídia) ===
-
-    if (role === ROLE_MASTER && oauth.isConfigured()) {
-        // 1. Detectar callback URL do OAuth (master colou a URL de redirecionamento)
-        const oauthData = oauth.extractCodeFromUrl(text);
-        if (oauthData) {
-            logger.info({ sender }, 'OAuth: callback URL detectada');
-            try {
-                await oauth.exchangeCode(oauthData.code, oauthData.state);
-                await sock.sendMessage(sender, {
-                    text: 'OAuth configurado com sucesso! Sua assinatura Claude Pro/Max está conectada.\n\nAgora pode me enviar mensagens normalmente.',
-                });
-            } catch (err) {
-                logger.error({ err }, 'OAuth: falha na troca de tokens');
-                await sock.sendMessage(sender, {
-                    text: `Erro ao configurar OAuth: ${err.message}\n\nTente novamente — envie "oauth" para gerar uma nova URL.`,
-                });
-            }
-            return;
-        }
-
-        // 2. Comando "oauth" — gera nova URL de autorização
-        if (text.trim().toLowerCase() === 'oauth') {
-            const authUrl = oauth.generateAuthUrl();
-            await sock.sendMessage(sender, {
-                text: `Conecte sua assinatura Claude Pro/Max:\n\n${authUrl}\n\nApós autorizar:\n1. O navegador vai redirecionar para uma página que não vai carregar (normal)\n2. Copie a URL completa da barra de endereço\n3. Cole e envie aqui\n\nA URL vai conter "?code=..." — é isso que preciso.`,
-            });
-            return;
-        }
-    }
-
     // === VERIFICAR SE HÁ AUTH CLAUDE DISPONÍVEL ===
 
-    const authAvailable = await hasClaudeAuth();
+    const hasApiKey = ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'sk-ant-...';
 
-    if (!authAvailable) {
-        // Sem auth nenhum — se OAuth está configurado, enviar URL
-        if (oauth.isConfigured() && role === ROLE_MASTER) {
-            const authUrl = oauth.generateAuthUrl();
+    if (!hasApiKey) {
+        if (role === ROLE_MASTER) {
             await sock.sendMessage(sender, {
-                text: `Bem-vindo ao OpenZap!\n\nPara começar, conecte sua conta Claude Pro/Max:\n\n${authUrl}\n\nApós autorizar, copie a URL completa da página de redirecionamento e envie aqui.\n\n(Se preferir usar uma API key, configure ANTHROPIC_API_KEY no .env e reinicie.)`,
-            });
-        } else if (role !== ROLE_MASTER) {
-            await sock.sendMessage(sender, {
-                text: 'O bot ainda não foi configurado. Aguarde o administrador.',
+                text: 'ANTHROPIC_API_KEY não configurada. Configure no .env e reinicie o bot.',
             });
         } else {
             await sock.sendMessage(sender, {
-                text: 'Nenhuma autenticação configurada. Configure ANTHROPIC_API_KEY ou OAuth no .env e reinicie.',
+                text: 'O bot ainda não foi configurado. Aguarde o administrador.',
             });
         }
         return;

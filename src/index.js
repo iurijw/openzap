@@ -1,7 +1,6 @@
 const { startWhatsApp } = require('./whatsapp');
 const { handleMessage } = require('./router');
 const { initCron } = require('./cron');
-const oauth = require('./oauth');
 const logger = require('./utils/logger');
 const { MASTER_PHONE, ANTHROPIC_API_KEY, OPENAI_API_KEY, DATA_DIR } = require('./config');
 const fs = require('fs/promises');
@@ -16,31 +15,14 @@ async function main() {
 
     // --- Validação de autenticação Claude ---
     const hasApiKey = ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'sk-ant-...';
-    const hasOAuth = oauth.isConfigured();
-    const hasOAuthTokens = hasOAuth && await oauth.hasValidTokens();
 
-    if (!hasApiKey && !hasOAuth) {
-        logger.error('Nenhuma autenticação Claude configurada.');
-        logger.error('Configure ANTHROPIC_API_KEY ou OAuth (CLAUDE_OAUTH_CLIENT_ID) no .env');
+    if (!hasApiKey) {
+        logger.error('ANTHROPIC_API_KEY não configurada.');
+        logger.error('Configure ANTHROPIC_API_KEY no .env');
         process.exit(1);
     }
 
-    if (hasApiKey) {
-        logger.info('Auth Claude: API key configurada');
-    }
-
-    if (hasOAuth) {
-        if (hasOAuthTokens) {
-            logger.info('Auth Claude: OAuth conectado (tokens válidos)');
-        } else {
-            logger.info('Auth Claude: OAuth configurado (aguardando autorização via WhatsApp)');
-        }
-    }
-
-    if (!hasApiKey && hasOAuth && !hasOAuthTokens) {
-        logger.warn('Sem API key e OAuth ainda não autorizado.');
-        logger.warn('O bot iniciará mas enviará link de autorização na primeira mensagem do master.');
-    }
+    logger.info('Auth Claude: API key configurada');
 
     // --- OpenAI (opcional) ---
     if (!OPENAI_API_KEY || OPENAI_API_KEY === 'sk-...') {
