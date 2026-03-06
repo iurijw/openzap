@@ -78,7 +78,6 @@ async function runAgent(sender, phone, role, userMessage, { fromCron = false } =
     }
 
     let iterations = 0;
-    const tools = getToolDefinitions();
     const client = createClient();
 
     if (!client) {
@@ -87,6 +86,9 @@ async function runAgent(sender, phone, role, userMessage, { fromCron = false } =
 
     while (iterations < MAX_TOOL_ITERATIONS) {
         iterations++;
+
+        // Refresh tools each iteration to pick up newly created custom tools
+        const tools = getToolDefinitions();
 
         logger.info({ sender, iteration: iterations, messagesCount: messages.length }, 'Chamando Claude');
 

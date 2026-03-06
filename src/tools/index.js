@@ -7,6 +7,7 @@ const fileList = require('./file_list');
 const execCommand = require('./exec');
 const cronHandler = require('./cron');
 const whatsappActions = require('./whatsapp_actions');
+const { customToolsHandler, executeCustomTool, loadRegistry } = require('./custom_tools');
 const logger = require('../utils/logger');
 
 const handlers = {
@@ -16,10 +17,13 @@ const handlers = {
     'executar_comando': execCommand,
     'gerenciar_cron': cronHandler,
     'acoes_whatsapp': whatsappActions,
+    'gerenciar_ferramentas': customToolsHandler,
 };
 
 /**
  * Dispatcher de tools com validação de permissão e sanitização de paths.
+ * Suporta tanto tools nativas quanto customizadas.
+ *
  * @param {string} name - Nome da tool
  * @param {object} args - Argumentos da tool
  * @param {object} context - { phone, role, sender }
@@ -47,21 +51,37 @@ async function dispatchTool(name, args, context) {
         args.path = normalized;
     }
 
-    // 3. Executa
+    // 3. Tentar handler nativo
     const handler = handlers[name];
-    if (!handler) {
-        logger.warn({ tool: name }, 'Tool desconhecida');
-        return { error: 'Ferramenta desconhecida.' };
+    if (handler) {
+        try {
+            const result = await handler(args, context);
+            logger.info({ tool: name, success: true }, 'Tool executada');
+            return result;
+        } catch (err) {
+            logger.error({ err, tool: name }, 'Erro ao executar tool');
+            return { error: `Erro: ${err.message}` };
+        }
     }
 
+    // 4. Tentar custom tool
     try {
-        const result = await handler(args, context);
-        logger.info({ tool: name, success: true }, 'Tool executada');
-        return result;
+        const registry = await loadRegistry();
+        const customTool = registry.find(t => t.name === name);
+
+        if (customTool) {
+            const result = await executeCustomTool(name, args, context);
+            logger.info({ tool: name, success: true, custom: true }, 'Custom tool executada');
+            return result;
+        }
     } catch (err) {
-        logger.error({ err, tool: name }, 'Erro ao executar tool');
+        logger.error({ err, tool: name }, 'Erro ao executar custom tool');
         return { error: `Erro: ${err.message}` };
     }
+
+    // 5. Tool desconhecida
+    logger.warn({ tool: name }, 'Tool desconhecida');
+    return { error: 'Ferramenta desconhecida.' };
 }
 
 module.exports = { dispatchTool, getToolDefinitions };

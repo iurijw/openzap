@@ -11,6 +11,7 @@ Um único container, sem dependências externas (sem banco, sem Redis, sem paine
 - Propósito e comportamento definidos pelo usuário master via onboarding
 - Agenda tarefas automáticas via cron do Linux
 - Ações autônomas no WhatsApp: enviar mensagens, áudios (TTS), verificar contatos
+- Ferramentas customizadas: o bot pode criar suas próprias tools em Node.js
 - Armazena tudo em `/data/` (volume Docker persistente)
 
 ## Estrutura de arquivos
@@ -33,14 +34,15 @@ Um único container, sem dependências externas (sem banco, sem Redis, sem paine
     ├── memory.js              # Histórico por contato em JSON (1 arquivo por telefone)
     ├── cron.js                # Gerenciador de cron: daemon, jobs, polling de triggers
     ├── tools/
-    │   ├── index.js           # Dispatcher: permissão → sanitização → execução
-    │   ├── definitions.js     # Schemas das 6 tools para Anthropic Claude
-    │   ├── permissions.js     # Controle de acesso por role (master/user)
+    │   ├── index.js           # Dispatcher: permissão → sanitização → execução (nativas + custom)
+    │   ├── definitions.js     # Schemas das 7 tools nativas + carrega custom tools
+    │   ├── permissions.js     # Controle de acesso por role (master/user) + granular WhatsApp
+    │   ├── custom_tools.js    # Gerenciador de ferramentas customizadas (criar/editar/remover)
     │   ├── file_read.js       # Tool: ler arquivo de /data/
     │   ├── file_write.js      # Tool: escrever arquivo (injeta master_jid no config)
     │   ├── file_list.js       # Tool: listar diretório
     │   ├── exec.js            # Tool: executar comando shell (30s timeout)
-    │   ├── cron.js            # Tool: gerenciar cron jobs (criar/listar/remover)
+    │   ├── cron.js            # Tool: gerenciar cron jobs (criar/listar/remover, mode agent/direct)
     │   └── whatsapp_actions.js # Tool: ações autônomas WhatsApp (msg, TTS, contatos)
     └── utils/
         ├── debounce.js        # Agrupa mensagens rápidas (13s padrão)
@@ -53,7 +55,7 @@ Um único container, sem dependências externas (sem banco, sem Redis, sem paine
 ┌──────────────────────────────────────────────────────────────────────┐
 │  ANTHROPIC (Claude Opus 4.6)                                        │
 │  ├── Raciocínio principal                                            │
-│  ├── Tool use (6 tools)                                              │
+│  ├── Tool use (7 tools nativas + custom tools)                       │
 │  ├── Conversação com usuários                                        │
 │  └── Decisões autônomas (cron jobs, ações WhatsApp)                  │
 │                                                                      │
@@ -73,7 +75,7 @@ WhatsApp → Baileys WebSocket → whatsapp.js (filtra msgs)
   → router.js (resolve role + debounce)
     → agent.js (Claude tool-use loop)
       → tools/index.js (permissão + sanitização de path)
-        → file_read / file_write / file_list / exec / cron / whatsapp_actions
+        → file_read / file_write / file_list / exec / cron / whatsapp_actions / custom_tools
       ← resultado da tool volta para Claude
     ← resposta final em texto
   → whatsapp.js (envia mensagem)
@@ -103,7 +105,7 @@ WhatsApp → Baileys (imageMessage)
 → WhatsApp
 ```
 
-### Cron jobs (Crontab → Trigger → Bot → WhatsApp)
+### Cron jobs — modo "agent" (Crontab → Claude → WhatsApp)
 
 ```
 cron daemon (Linux) → scripts/cron_trigger.sh (lê job, escreve trigger file)
@@ -114,6 +116,71 @@ cron daemon (Linux) → scripts/cron_trigger.sh (lê job, escreve trigger file)
     → whatsapp.js (envia mensagem ao target_jid)
   → WhatsApp
 ```
+
+### Cron jobs — modo "direct" (Crontab → Script → WhatsApp)
+
+```
+cron daemon (Linux) → scripts/cron_trigger.sh (lê job, escreve trigger file)
+  → /data/cron_triggers/{timestamp}-{job_id}.json
+    → cron.js (polling detecta trigger com mode "direct")
+      → execSync(script) — executa o script diretamente
+      ← stdout do script
+    → whatsapp.js (envia stdout como mensagem ao target_jid)
+  → WhatsApp
+```
+
+O modo "direct" NÃO passa pelo Claude, não consome tokens. Ideal para monitores, alertas e tarefas repetitivas simples.
+
+## Ferramentas customizadas
+
+O bot pode criar suas próprias ferramentas via `gerenciar_ferramentas`. Ferramentas customizadas são scripts Node.js armazenados em `/data/custom_tools/`.
+
+### Arquitetura
+
+```
+/data/custom_tools/
+├── registry.json         # Registro com schemas de todas as custom tools
+├── bitcoin_price.js      # Handler: module.exports = async function(args, context) { ... }
+├── consultar_cep.js      # Cada tool é um arquivo .js independente
+└── ...
+```
+
+### Formato do handler
+
+```js
+// O handler deve exportar uma função async
+module.exports = async function(args, context) {
+    // args: parâmetros definidos no input_schema da tool
+    // context: { phone, role, sender }
+
+    // Pode usar qualquer módulo Node.js
+    const https = require('https');
+    const { execSync } = require('child_process');
+
+    // ... lógica da ferramenta ...
+
+    return { resultado: 'dados' };  // Retorna objeto JSON
+};
+```
+
+### Ciclo de vida
+
+1. Master pede ao bot para criar uma ferramenta
+2. Bot usa `gerenciar_ferramentas` com action "criar", passando nome, descrição, schema e código
+3. Handler é salvo em `/data/custom_tools/{nome}.js` e registrado em `registry.json`
+4. `getToolDefinitions()` carrega custom tools do registry a cada iteração do loop
+5. A ferramenta fica disponível imediatamente na mesma conversa
+6. Permissões: master usa qualquer custom tool; users precisam que o master adicione o nome da tool ao `user_allowed_tools`
+
+### Ações disponíveis
+
+| Ação       | Descrição                                              |
+|------------|--------------------------------------------------------|
+| `criar`    | Cria nova ferramenta com nome, descrição, schema e código |
+| `editar`   | Atualiza descrição, schema ou código de uma ferramenta    |
+| `listar`   | Lista todas as ferramentas customizadas                   |
+| `remover`  | Remove uma ferramenta                                     |
+| `ver_codigo` | Exibe o código-fonte de uma ferramenta                  |
 
 ## Identificação de remetente (master vs user)
 
@@ -136,14 +203,16 @@ Segurança em 3 camadas:
 
 ### Matriz de permissões
 
-| Tool                 | Master          | User                                       |
-|----------------------|-----------------|---------------------------------------------|
-| `executar_comando`   | Liberado (tudo) | Bloqueado sempre                             |
-| `gerenciar_cron`     | Liberado (tudo) | Bloqueado sempre                             |
-| `acoes_whatsapp`     | Liberado (tudo) | Bloqueado (liberável via `user_allowed_tools`)|
-| `escrever_arquivo`   | Liberado (tudo) | Só `users/{phone}/`                          |
-| `ler_arquivo`        | Liberado (tudo) | Só `config.json` e `users/{phone}/`          |
-| `listar_arquivos`    | Liberado (tudo) | Só `users/{phone}/`; bloqueado raiz e `users/` |
+| Tool                    | Master          | User                                                |
+|-------------------------|-----------------|-----------------------------------------------------|
+| `executar_comando`      | Liberado (tudo) | Bloqueado sempre                                     |
+| `gerenciar_cron`        | Liberado (tudo) | Bloqueado sempre                                     |
+| `gerenciar_ferramentas` | Liberado (tudo) | Bloqueado sempre                                     |
+| `acoes_whatsapp`        | Liberado (tudo) | Bloqueado (liberável via `user_allowed_tools` + granular) |
+| `escrever_arquivo`      | Liberado (tudo) | Só `users/{phone}/`                                  |
+| `ler_arquivo`           | Liberado (tudo) | Só `config.json`, `users/{phone}/` e `master_shared_user/` |
+| `listar_arquivos`       | Liberado (tudo) | Só `users/{phone}/` e `master_shared_user/`           |
+| Custom tools            | Liberado (tudo) | Bloqueado (liberável via `user_allowed_tools`)        |
 
 ### user_allowed_tools (permissões dinâmicas)
 
@@ -151,14 +220,58 @@ O master pode liberar tools para o contexto de users adicionando nomes ao array 
 
 ```json
 {
-    "user_allowed_tools": ["acoes_whatsapp"]
+    "user_allowed_tools": ["acoes_whatsapp", "consultar_cep"]
 }
 ```
 
-- **Liberáveis:** `acoes_whatsapp`, `ler_arquivo`, `escrever_arquivo`, `listar_arquivos`
-- **Nunca liberáveis (segurança):** `executar_comando`, `gerenciar_cron` — bloqueio hardcoded em `permissions.js`
+- **Liberáveis:** `acoes_whatsapp`, `ler_arquivo`, `escrever_arquivo`, `listar_arquivos`, e qualquer custom tool pelo nome
+- **Nunca liberáveis (segurança):** `executar_comando`, `gerenciar_cron`, `gerenciar_ferramentas` — bloqueio hardcoded em `permissions.js`
 
-Quando o master configura o bot para executar ações autônomas ao receber mensagens de users (ex: encaminhar mensagens de desconhecidos), ele precisa adicionar `"acoes_whatsapp"` ao `user_allowed_tools`. O sistema de prompts informa ao agente quais tools estão disponíveis no contexto atual.
+### Permissões granulares do WhatsApp (whatsapp_permissions)
+
+O `user_allowed_tools` libera `acoes_whatsapp` de forma completa (todas as ações, todos os destinos). Para controle fino, configure `whatsapp_permissions` no `config.json`:
+
+```json
+{
+    "user_allowed_tools": ["acoes_whatsapp"],
+    "whatsapp_permissions": {
+        "allowed_actions": ["enviar_mensagem"],
+        "allowed_targets": ["master"]
+    }
+}
+```
+
+**`allowed_actions`** — quais ações WhatsApp são permitidas no contexto de users:
+- `enviar_mensagem`, `enviar_audio`, `verificar_contato`, `info_perfil`
+- Se não definido ou vazio: todas as ações são permitidas
+
+**`allowed_targets`** — para quem o bot pode enviar no contexto de users:
+- `"master"` — resolve automaticamente para o `master_jid` do config
+- `"sender"` — resolve para o JID do remetente atual (o user que está conversando)
+- JID literal — ex: `"5511999999999@s.whatsapp.net"` ou `"278876890603567@lid"`
+- Número de telefone — ex: `"5511999999999"` (convertido automaticamente para JID)
+- Se não definido ou vazio: todos os destinos são permitidos
+
+**Exemplo prático:** "Quero que o bot me avise quando alguém mandar mensagem"
+```json
+{
+    "user_allowed_tools": ["acoes_whatsapp"],
+    "whatsapp_permissions": {
+        "allowed_actions": ["enviar_mensagem"],
+        "allowed_targets": ["master"]
+    }
+}
+```
+O bot pode enviar mensagem ao master quando um user interage, mas NÃO pode enviar para qualquer outro número.
+
+### Pasta compartilhada (master_shared_user/)
+
+`/data/master_shared_user/` é uma pasta compartilhada entre master e users:
+
+- **Master:** acesso total (leitura + escrita)
+- **Users:** somente leitura (pode ler e listar, não pode escrever)
+
+Use para compartilhar documentos, FAQs, regras, catálogos, ou qualquer informação que users devem poder acessar via bot.
 
 ### Sanitização de paths
 
@@ -169,7 +282,7 @@ O dispatcher (`tools/index.js`) bloqueia path traversal antes de executar qualqu
 
 ## Tool: Ações WhatsApp (acoes_whatsapp)
 
-Nova tool que permite ao agente realizar ações autônomas no WhatsApp:
+Tool que permite ao agente realizar ações autônomas no WhatsApp:
 
 | Ação                | Descrição                                                |
 |---------------------|----------------------------------------------------------|
@@ -180,9 +293,18 @@ Nova tool que permite ao agente realizar ações autônomas no WhatsApp:
 
 O agente pode usar `phone` (número) ou `target_jid` (JID completo) como identificador.
 
+No contexto de users, ações e destinos podem ser restritos via `whatsapp_permissions`.
+
 ## Sistema de cron jobs
 
 O bot usa o cron nativo do Linux para agendar tarefas automáticas. O agente (master) cria, lista e remove jobs via a tool `gerenciar_cron`.
+
+### Modos de execução
+
+| Modo     | Descrição                                                          | Consome tokens? |
+|----------|--------------------------------------------------------------------|-----------------|
+| `agent`  | Quando o cron dispara, executa via Claude (tool use completo)       | Sim             |
+| `direct` | Quando o cron dispara, executa um script diretamente (stdout = msg) | Não             |
 
 ### Arquitetura
 
@@ -192,12 +314,13 @@ O bot usa o cron nativo do Linux para agendar tarefas automáticas. O agente (ma
 │                                                             │
 │  crontab dispara ──→ cron_trigger.sh ──→ trigger file       │
 │                                                             │
-│  cron.js (polling 10s) ──→ detecta trigger ──→ runAgent()   │
-│                                ──→ sendMessage()            │
+│  cron.js (polling 10s) ──→ detecta trigger                  │
+│     ├── mode "agent"  ──→ runAgent() ──→ sendMessage()      │
+│     └── mode "direct" ──→ execSync(script) ──→ sendMessage()│
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Formato de um job
+### Formato de um job (mode agent)
 
 ```json
 {
@@ -205,6 +328,7 @@ O bot usa o cron nativo do Linux para agendar tarefas automáticas. O agente (ma
     "schedule": "0 8 * * 1-5",
     "description": "Tarefa diária às 8h",
     "target_jid": "278876890603567@lid",
+    "mode": "agent",
     "prompt": "Execute a tarefa X e me envie o resultado.",
     "role": "master",
     "created_by": "278876890603567@lid",
@@ -212,11 +336,50 @@ O bot usa o cron nativo do Linux para agendar tarefas automáticas. O agente (ma
 }
 ```
 
+### Formato de um job (mode direct)
+
+```json
+{
+    "id": "b2c3d4e5-f6a7-...",
+    "schedule": "*/5 * * * *",
+    "description": "Monitor de preço do Bitcoin a cada 5 minutos",
+    "target_jid": "278876890603567@lid",
+    "mode": "direct",
+    "script": "scripts/bitcoin_monitor.sh",
+    "role": "master",
+    "created_by": "278876890603567@lid",
+    "created_at": "2026-03-03T23:00:00.000Z"
+}
+```
+
+### Exemplo: monitor de preço (cron direto)
+
+1. Bot cria o script via `escrever_arquivo`:
+```bash
+#!/bin/sh
+curl -s "https://api.coindesk.com/v1/bpi/currentprice.json" | jq -r '"Bitcoin: $" + .bpi.USD.rate'
+```
+
+2. Bot cria o cron via `gerenciar_cron`:
+```json
+{
+    "action": "criar",
+    "schedule": "*/5 * * * *",
+    "mode": "direct",
+    "script": "scripts/bitcoin_monitor.sh",
+    "description": "Monitor de preço do Bitcoin a cada 5 minutos"
+}
+```
+
+3. A cada 5 minutos, o script roda e o stdout ("Bitcoin: $97,123.45") é enviado como mensagem.
+
 ### Comportamento de cron no histórico
 
-Quando um cron dispara, o `runAgent` roda com `fromCron=true`:
+Quando um cron dispara no modo "agent", o `runAgent` roda com `fromCron=true`:
 - O **prompt do cron NÃO é salvo** no histórico do contato (é uma instrução interna)
 - A **resposta DO agente É salva** no histórico (para contexto em conversas futuras)
+
+No modo "direct", nada é salvo no histórico (execução puramente mecânica).
 
 ### Fuso horário
 
@@ -239,12 +402,17 @@ O cron do Linux usa **UTC** por padrão dentro do container.
 ├── tmp/                   # Arquivos temporários (áudio, conversões)
 ├── cron_jobs.json         # Definições de cron jobs (gerenciado por cron.js)
 ├── cron_triggers/         # Arquivos trigger temporários (processados e deletados)
+├── custom_tools/          # Ferramentas customizadas criadas pelo bot
+│   ├── registry.json      # Registro com schemas das custom tools
+│   └── *.js               # Handlers das ferramentas
+├── master_shared_user/    # Pasta compartilhada: leitura para users, total para master
 └── (o restante é criado pelo agente conforme necessidade)
     ├── users/             # Dados por usuário (pasta individual)
+    ├── scripts/           # Scripts para cron direto
     └── ...
 ```
 
-Apenas `auth/`, `config.json`, `memory/`, `tmp/`, `cron_jobs.json` e `cron_triggers/` têm estrutura definida pelo código. O agente organiza o restante livremente.
+Apenas `auth/`, `config.json`, `memory/`, `tmp/`, `cron_jobs.json`, `cron_triggers/` e `custom_tools/` têm estrutura definida pelo código. O agente organiza o restante livremente.
 
 ## Autenticação Claude
 
@@ -278,6 +446,7 @@ Configure `ANTHROPIC_API_KEY` no `.env` com sua chave da API Anthropic. Cobrado 
 | Shell timeout            | 30s      | `exec.js`        | Timeout para comandos shell                  |
 | Shell max buffer         | 1MB      | `exec.js`        | Buffer máximo de saída do comando            |
 | Shell output truncation  | 10000ch  | `exec.js`        | Saída truncada para não estourar payload     |
+| Direct script timeout    | 30s      | `cron.js`        | Timeout para scripts de cron direto          |
 | Cron trigger polling     | 10s      | `cron.js`        | Intervalo de verificação de triggers         |
 | Reconnect delay          | 3s       | `whatsapp.js`    | Espera antes de reconectar ao WhatsApp       |
 | Keep-alive interval      | 25s      | `whatsapp.js`    | Pings de keep-alive para WhatsApp            |
@@ -318,6 +487,9 @@ docker exec openzap cat /data/config.json
 docker exec openzap cat /data/cron_jobs.json
 docker exec openzap crontab -l
 
+# Ver ferramentas customizadas
+docker exec openzap cat /data/custom_tools/registry.json
+
 # Limpar todos os cron jobs
 docker exec openzap sh -c 'echo "[]" > /data/cron_jobs.json && crontab -r'
 
@@ -346,10 +518,15 @@ Após confirmação, salva `/data/config.json` com `setup_complete: true` e o `m
 - **Áudio bidirecional**: Entrada (Whisper) e saída (TTS) de áudio via OpenAI, com ffmpeg para conversão de formatos.
 - **Propósito genérico**: O onboarding não assume nenhum domínio (clínica, vendas, etc). O master define livremente o que o bot faz.
 - **Cron via Linux nativo**: Usa o `cron` daemon do Debian. Mais confiável que schedulers em Node.js para tarefas de longo prazo.
+- **Cron direto (mode "direct")**: Scripts executados diretamente pelo cron sem passar pelo Claude. Stdout vira mensagem. Sem custo de tokens.
+- **Ferramentas customizadas**: O bot cria tools em runtime via `gerenciar_ferramentas`. Handlers em `/data/custom_tools/` são carregados com `require()` e cache é limpo a cada execução para refletir edições.
+- **Tools refresh por iteração**: `getToolDefinitions()` é chamado a cada iteração do loop no `agent.js`, garantindo que custom tools criadas na mesma conversa fiquem disponíveis imediatamente.
+- **Permissões granulares WhatsApp**: `whatsapp_permissions` no config.json permite restringir ações e destinos quando `acoes_whatsapp` é liberada para users. Suporta keywords `"master"` e `"sender"` além de JIDs/telefones literais.
+- **master_shared_user/**: Pasta compartilhada com users (leitura) e master (total). Permite ao master disponibilizar documentos, FAQs, etc.
 - **`fromCron` no agent.js**: Prompt do cron não polui histórico, mas a resposta sim (mantém contexto).
-- **Dependência circular `cron.js ↔ agent.js`**: Resolvida com lazy `require()` dentro de `processTrigger()`.
+- **Dependência circular `cron.js ↔ agent.js`**: Resolvida com lazy `require()` dentro de `processAgentTrigger()`.
 - **Lazy require em `whatsapp_actions.js`**: Importa `getSock()` em runtime para evitar dependência circular.
-- **`execSync` no `exec.js`**: Bloqueia o event loop por até 30s. Aceitável para operações pontuais.
+- **`execSync` no `exec.js` e cron direto**: Bloqueia o event loop por até 30s. Aceitável para operações pontuais.
 - **Debounce de 13s**: Configurável via `DEBOUNCE_SECONDS`.
 - **Nomes de tools em português**: Consistente com os prompts em português.
 - **Sem framework web**: O container não abre portas. Toda comunicação via WebSocket de saída.
@@ -379,6 +556,8 @@ Após confirmação, salva `/data/config.json` com `setup_complete: true` e o `m
 | Token usage alto | Contexto grande | Reduzir `CONTEXT_WINDOW` em `agent.js` (default 30) |
 | Cron não dispara | Daemon cron não rodando | `docker exec openzap crontab -l` para verificar; `docker compose restart` para reiniciar |
 | Cron dispara no horário errado | Fuso horário UTC no container | Adicionar `TZ=America/Sao_Paulo` no `.env` |
+| Cron direto falha | Script não encontrado ou sem permissão | Verificar caminho em cron_jobs.json; erros são enviados ao destinatário |
+| Custom tool não funciona | Handler com erro de sintaxe | Usar `gerenciar_ferramentas` com action "ver_codigo" para inspecionar |
 | Áudio não transcreve | OpenAI key ausente ou ffmpeg falhou | Verificar `OPENAI_API_KEY` no `.env` e logs |
 | Imagem não analisa | OpenAI key ausente | Verificar `OPENAI_API_KEY` no `.env` |
 | TTS não funciona | OpenAI key ausente | Verificar `OPENAI_API_KEY` no `.env` |

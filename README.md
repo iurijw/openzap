@@ -105,9 +105,11 @@ Apos confirmar, o bot salva a configuracao e esta pronto para operar.
 | Quem e | O dono do bot (primeiro a enviar msg ou `MASTER_PHONE`) | Qualquer outro contato |
 | Comandos shell | Liberado | Bloqueado |
 | Cron jobs | Liberado | Bloqueado |
-| Acoes WhatsApp | Liberado | Bloqueado |
+| Criar ferramentas | Liberado | Bloqueado |
+| Acoes WhatsApp | Liberado | Bloqueado (liberavel com restricoes) |
 | Escrita de arquivos | Tudo em `/data/` | Apenas `users/{phone}/` |
-| Leitura de arquivos | Tudo em `/data/` | Apenas `config.json` e `users/{phone}/` |
+| Leitura de arquivos | Tudo em `/data/` | `config.json`, `users/{phone}/`, `master_shared_user/` |
+| Custom tools | Todas | Bloqueado (liberavel individualmente) |
 
 O master e identificado automaticamente:
 1. Sem config (onboarding): primeiro remetente = master
@@ -116,7 +118,7 @@ O master e identificado automaticamente:
 
 ## Ferramentas do agente
 
-O Claude tem acesso a 6 ferramentas que usa de forma autonoma:
+O Claude tem acesso a 7 ferramentas nativas + ferramentas customizadas criadas pelo bot:
 
 | Ferramenta | O que faz |
 |---|---|
@@ -126,16 +128,53 @@ O Claude tem acesso a 6 ferramentas que usa de forma autonoma:
 | `listar_arquivos` | Lista diretorios em `/data/` |
 | `gerenciar_cron` | Cria, lista e remove tarefas agendadas (cron jobs) |
 | `acoes_whatsapp` | Envia mensagens, audio TTS, verifica contatos |
+| `gerenciar_ferramentas` | Cria, edita, lista e remove ferramentas customizadas |
+
+### Ferramentas customizadas
+
+O bot pode criar suas proprias ferramentas em Node.js. O master pede, o bot cria o codigo e registra como uma tool disponivel. Ferramentas customizadas ficam em `/data/custom_tools/` e sao carregadas automaticamente.
 
 ## Cron jobs (tarefas agendadas)
 
-O master pode pedir ao bot para agendar tarefas automaticas. Exemplos:
+O master pode pedir ao bot para agendar tarefas automaticas. Dois modos:
 
+**Mode "agent" (padrao):** Quando dispara, o Claude processa a instrucao e gera uma resposta. Consome tokens.
 - "Me lembre todo dia as 8h de verificar o email"
 - "Todo dia util as 18h, envie um resumo do dia"
+
+**Mode "direct":** Quando dispara, executa um script diretamente e envia o stdout como mensagem. NAO consome tokens.
+- "Crie um monitor de preco do Bitcoin que me envie a cada 5 minutos"
 - "A cada 30 minutos, verifique se o site X esta online"
 
 O cron usa o daemon nativo do Linux. Os horarios seguem o fuso do container (UTC por padrao). Para usar horario de Brasilia, adicione `TZ=America/Sao_Paulo` no `.env`.
+
+## Pasta compartilhada (master_shared_user/)
+
+`/data/master_shared_user/` e uma pasta compartilhada entre master e users:
+
+- **Master:** acesso total (leitura + escrita)
+- **Users:** somente leitura
+
+Use para compartilhar documentos, FAQs, regras, catalogos que users devem poder acessar via bot.
+
+## Permissoes granulares do WhatsApp
+
+O master pode liberar `acoes_whatsapp` para users com restricoes finas via `whatsapp_permissions` no config.json:
+
+```json
+{
+    "user_allowed_tools": ["acoes_whatsapp"],
+    "whatsapp_permissions": {
+        "allowed_actions": ["enviar_mensagem"],
+        "allowed_targets": ["master"]
+    }
+}
+```
+
+- `allowed_actions`: quais acoes sao permitidas (enviar_mensagem, enviar_audio, verificar_contato, info_perfil)
+- `allowed_targets`: para quem pode enviar ("master", "sender", JID literal, ou numero de telefone)
+
+Exemplo: permitir que o bot avise o master quando alguem mandar mensagem, mas NAO possa enviar para ninguem mais.
 
 ## Midia (audio e imagem)
 
@@ -180,6 +219,9 @@ docker exec openzap cat /data/config.json
 # Ver cron jobs ativos
 docker exec openzap cat /data/cron_jobs.json
 
+# Ver ferramentas customizadas
+docker exec openzap cat /data/custom_tools/registry.json
+
 # Dev local (sem Docker)
 npm install
 DATA_DIR=./data node src/index.js
@@ -202,11 +244,12 @@ openzap/
     ├── agent.js               # Loop de raciocinio Claude (tool use)
     ├── config.js              # Variaveis, roles, prompts
     ├── memory.js              # Historico por contato (JSON)
-    ├── cron.js                # Sistema de cron jobs
+    ├── cron.js                # Sistema de cron jobs (agent + direct)
     ├── tools/
     │   ├── index.js           # Dispatcher (permissao + sanitizacao)
-    │   ├── definitions.js     # Schemas das tools
-    │   ├── permissions.js     # Controle de acesso master/user
+    │   ├── definitions.js     # Schemas das tools (nativas + custom)
+    │   ├── permissions.js     # Controle de acesso (master/user + granular)
+    │   ├── custom_tools.js    # Gerenciador de ferramentas customizadas
     │   ├── file_read.js
     │   ├── file_write.js
     │   ├── file_list.js
@@ -228,6 +271,8 @@ openzap/
 ├── tmp/               # Arquivos temporarios (audio, conversoes)
 ├── cron_jobs.json     # Definicoes de cron jobs
 ├── cron_triggers/     # Triggers temporarios de cron
+├── custom_tools/      # Ferramentas customizadas (registry.json + handlers .js)
+├── master_shared_user/ # Pasta compartilhada: leitura para users, total para master
 └── ...                # O agente organiza o restante livremente
 ```
 
@@ -242,6 +287,8 @@ openzap/
 | Audio/imagem nao funciona | Verifique se `OPENAI_API_KEY` esta no `.env` |
 | Erro "Caminho invalido" | Paths devem ser relativos, sem `..` e sem `/` no inicio |
 | Mensagens duplicadas | Normal na reconexao — o filtro descarta msgs historicas |
+| Cron direto falha | Verifique caminho do script em cron_jobs.json; erros sao enviados ao destinatario |
+| Custom tool falha | Use `gerenciar_ferramentas` com action "ver_codigo" para inspecionar o handler |
 
 ## Limites internos
 
@@ -251,6 +298,7 @@ openzap/
 | Max tokens na resposta | 8192 | agent.js |
 | Historico salvo em disco | 100 msgs/contato | memory.js |
 | Timeout de comandos shell | 30s | exec.js |
+| Timeout de scripts diretos | 30s | cron.js |
 | Polling de cron triggers | 10s | cron.js |
 | Debounce de mensagens | 13s | debounce.js |
 | Timeout de conexao WhatsApp | 60s | whatsapp.js |

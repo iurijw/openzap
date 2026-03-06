@@ -1,7 +1,11 @@
 /**
  * Definições de tools para a Anthropic Claude API (tool use format).
  * Cada tool tem nome em português para manter coerência com o prompt.
+ *
+ * getToolDefinitions() carrega também ferramentas customizadas de /data/custom_tools/registry.json.
  */
+
+const { loadRegistrySync } = require('./custom_tools');
 
 const toolDefinitions = [
     {
@@ -66,7 +70,7 @@ const toolDefinitions = [
     },
     {
         name: 'gerenciar_cron',
-        description: 'Gerencia tarefas agendadas (cron jobs). Cria lembretes automáticos, notificações recorrentes, rotinas periódicas, etc. Quando o cron dispara, o assistente executa a instrução e envia a mensagem ao destinatário.',
+        description: 'Gerencia tarefas agendadas (cron jobs). Suporta dois modos: "agent" (padrão — o assistente processa via Claude quando disparar) e "direct" (executa um script diretamente e envia stdout como mensagem, sem consumir tokens). Use "direct" para monitores, alertas e tarefas repetitivas simples.',
         input_schema: {
             type: 'object',
             properties: {
@@ -81,7 +85,7 @@ const toolDefinitions = [
                 },
                 prompt: {
                     type: 'string',
-                    description: 'Instrução que o assistente seguirá quando o cron disparar. Pode ler arquivos, executar comandos, etc.',
+                    description: 'Instrução que o assistente seguirá quando o cron disparar (apenas para mode "agent").',
                 },
                 description: {
                     type: 'string',
@@ -94,6 +98,15 @@ const toolDefinitions = [
                 job_id: {
                     type: 'string',
                     description: 'ID do cron job (obrigatório para ação "remover").',
+                },
+                mode: {
+                    type: 'string',
+                    enum: ['agent', 'direct'],
+                    description: 'Modo de execução. "agent" (padrão): processa via Claude. "direct": executa script e envia stdout como mensagem (não consome tokens).',
+                },
+                script: {
+                    type: 'string',
+                    description: 'Caminho do script relativo a /data/ (obrigatório para mode "direct"). O stdout do script será enviado como mensagem. Ex: scripts/bitcoin_monitor.sh',
                 },
             },
             required: ['action'],
@@ -126,10 +139,59 @@ const toolDefinitions = [
             required: ['action'],
         },
     },
+    {
+        name: 'gerenciar_ferramentas',
+        description: 'Cria, edita, lista e remove ferramentas customizadas. Ferramentas são scripts Node.js que ficam disponíveis como tools do agente. O código deve exportar: module.exports = async function(args, context) { ... return { resultado }; }. Pode usar require() para módulos Node.js (fs, path, child_process, https, etc.).',
+        input_schema: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['criar', 'editar', 'listar', 'remover', 'ver_codigo'],
+                    description: 'Ação a executar.',
+                },
+                name: {
+                    type: 'string',
+                    description: 'Nome da ferramenta (letras minúsculas, números, underscore, começa com letra). Ex: bitcoin_price, consultar_cep',
+                },
+                description: {
+                    type: 'string',
+                    description: 'Descrição do que a ferramenta faz.',
+                },
+                input_schema: {
+                    type: 'object',
+                    description: 'Schema dos parâmetros da ferramenta (formato JSON Schema). Define os argumentos que a ferramenta aceita.',
+                },
+                code: {
+                    type: 'string',
+                    description: 'Código JavaScript do handler. Deve exportar uma função: module.exports = async function(args, context) { ... return { resultado }; }. O context contém: { phone, role, sender }.',
+                },
+            },
+            required: ['action'],
+        },
+    },
 ];
 
+/**
+ * Retorna todas as definições de tools (nativas + customizadas).
+ * Carrega custom tools do registry a cada chamada para refletir mudanças em tempo real.
+ * @returns {Array} Array de tool definitions no formato Anthropic
+ */
 function getToolDefinitions() {
-    return toolDefinitions;
+    const allTools = [...toolDefinitions];
+
+    // Load custom tools from registry (sync for compatibility with agent loop)
+    const customTools = loadRegistrySync();
+
+    for (const tool of customTools) {
+        allTools.push({
+            name: tool.name,
+            description: tool.description || 'Ferramenta customizada',
+            input_schema: tool.input_schema || { type: 'object', properties: {}, required: [] },
+        });
+    }
+
+    return allTools;
 }
 
 module.exports = { getToolDefinitions };

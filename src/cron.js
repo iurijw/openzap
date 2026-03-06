@@ -63,9 +63,15 @@ async function saveJobs(jobs) {
 
 /**
  * Cria um novo cron job.
+ * Suporta mode "agent" (padrão) e "direct" (executa script diretamente).
+ *
+ * @param {object} params - Dados do job
+ * @param {string} params.mode - "agent" ou "direct"
+ * @param {string} [params.script] - Caminho do script (para mode "direct")
+ * @param {string} [params.prompt] - Instrução para o agente (para mode "agent")
  * @returns {object} Job criado com ID gerado
  */
-async function addJob({ schedule, description, target_jid, prompt, role, created_by }) {
+async function addJob({ schedule, description, target_jid, prompt, script, mode, role, created_by }) {
     const jobs = await loadJobs();
 
     const job = {
@@ -73,17 +79,24 @@ async function addJob({ schedule, description, target_jid, prompt, role, created
         schedule,
         description: description || 'Tarefa agendada',
         target_jid,
-        prompt,
+        mode: mode || 'agent',
         role: role || 'master',
         created_by,
         created_at: new Date().toISOString(),
     };
 
+    // Campos específicos por modo
+    if (job.mode === 'direct') {
+        job.script = script;
+    } else {
+        job.prompt = prompt;
+    }
+
     jobs.push(job);
     await saveJobs(jobs);
     await syncCrontab();
 
-    logger.info({ jobId: job.id, schedule, description: job.description }, 'Cron job criado');
+    logger.info({ jobId: job.id, schedule, mode: job.mode, description: job.description }, 'Cron job criado');
     return job;
 }
 
@@ -185,11 +198,100 @@ async function processTrigger(filePath) {
         return;
     }
 
+    const mode = trigger.mode || 'agent';
+
     logger.info(
-        { jobId: trigger.id, target: trigger.target_jid, description: trigger.description },
+        { jobId: trigger.id, target: trigger.target_jid, mode, description: trigger.description },
         'Processando trigger de cron'
     );
 
+    // Modo direto: executa script e envia stdout como mensagem
+    if (mode === 'direct') {
+        await processDirectTrigger(trigger);
+        return;
+    }
+
+    // Modo agent: processa via Claude
+    await processAgentTrigger(trigger);
+}
+
+/**
+ * Processa trigger no modo "direct": executa o script diretamente
+ * e envia o stdout como mensagem ao destinatário.
+ * Não consome tokens do Claude.
+ */
+async function processDirectTrigger(trigger) {
+    if (!trigger.script) {
+        logger.error({ jobId: trigger.id }, 'Trigger direto sem script definido');
+        return;
+    }
+
+    const scriptPath = path.join(DATA_DIR, trigger.script);
+
+    // Verificar se o script existe
+    try {
+        await fs.access(scriptPath);
+    } catch {
+        logger.error({ scriptPath, jobId: trigger.id }, 'Script direto não encontrado');
+        if (sock && trigger.target_jid) {
+            try {
+                await sock.sendMessage(trigger.target_jid, {
+                    text: `[Erro cron "${trigger.description || trigger.id}"]: Script não encontrado: ${trigger.script}`,
+                });
+            } catch {}
+        }
+        return;
+    }
+
+    try {
+        // Determinar como executar baseado na extensão
+        const ext = path.extname(scriptPath).toLowerCase();
+        let cmd;
+        if (ext === '.js') {
+            cmd = `node "${scriptPath}"`;
+        } else if (ext === '.py') {
+            cmd = `python3 "${scriptPath}"`;
+        } else {
+            // Para .sh e outros: tornar executável e rodar via sh
+            try { execSync(`chmod +x "${scriptPath}"`, { stdio: 'pipe' }); } catch {}
+            cmd = `sh "${scriptPath}"`;
+        }
+
+        const output = execSync(cmd, {
+            cwd: DATA_DIR,
+            timeout: 30000,
+            encoding: 'utf-8',
+            maxBuffer: 1024 * 1024,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: { ...process.env, DATA_DIR },
+        });
+
+        if (output && output.trim()) {
+            await sock.sendMessage(trigger.target_jid, { text: output.trim() });
+            logger.info(
+                { jobId: trigger.id, target: trigger.target_jid, outputLength: output.length },
+                'Mensagem de cron direto enviada'
+            );
+        }
+    } catch (err) {
+        const stderr = err.stderr || err.message || 'Erro desconhecido';
+        logger.error({ jobId: trigger.id, stderr: stderr.substring(0, 500) }, 'Erro ao executar script direto');
+
+        // Enviar erro ao destinatário
+        if (sock && trigger.target_jid) {
+            try {
+                await sock.sendMessage(trigger.target_jid, {
+                    text: `[Erro cron "${trigger.description || trigger.id}"]: ${stderr.substring(0, 500)}`,
+                });
+            } catch {}
+        }
+    }
+}
+
+/**
+ * Processa trigger no modo "agent": executa via Claude (comportamento original).
+ */
+async function processAgentTrigger(trigger) {
     try {
         // Lazy require para evitar dependência circular (cron → agent → tools → cron)
         const { runAgent } = require('./agent');
