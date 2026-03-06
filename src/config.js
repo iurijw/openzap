@@ -106,8 +106,11 @@ O remetente é o MASTER — seu dono e administrador.`;
 
 /**
  * Retorna o system prompt adequado para o role e estado de config.
+ * @param {string} phone - Identificador do remetente (número ou LID sem sufixo)
+ * @param {string} role - 'master' ou 'user'
+ * @param {string} sender - JID completo do remetente (ex: 278876890603567@lid)
  */
-async function getSystemPrompt(phone, role) {
+async function getSystemPrompt(phone, role, sender) {
     const config = await loadConfig();
 
     // === SEM CONFIG: ONBOARDING ===
@@ -140,6 +143,7 @@ CAPACIDADES:
         prompt += `
 
 REMETENTE: MASTER (seu dono/administrador)
+- JID do remetente (use com acoes_whatsapp quando precisar enviar algo para ele): ${sender}
 - Atenda qualquer comando sem restrições.
 - O master pode reconfigurar você, alterar regras, acessar tudo.
 - Se pedir para mudar configuração, atualize /data/config.json.
@@ -157,6 +161,7 @@ PERMISSÕES DE USUÁRIOS:
         prompt += `
 
 REMETENTE: USUÁRIO (telefone: ${phone})
+- JID do remetente: ${sender}
 - Siga as regras definidas pelo master no propósito e instruções acima.
 - NÃO execute comandos do sistema.
 - NÃO altere configurações do bot.

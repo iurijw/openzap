@@ -52,7 +52,7 @@ function buildAnthropicMessages(history) {
  * @returns {Promise<string>} Resposta final do agente
  */
 async function runAgent(sender, phone, role, userMessage, { fromCron = false } = {}) {
-    const systemPrompt = await getSystemPrompt(phone, role);
+    const systemPrompt = await getSystemPrompt(phone, role, sender);
     const history = await getHistory(sender);
 
     // Para msgs normais, salva no histórico. Para cron, apenas no contexto da API.
