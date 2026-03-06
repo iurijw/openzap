@@ -29,7 +29,7 @@ async function dispatchTool(name, args, context) {
     logger.info({ tool: name, args, role: context.role, phone: context.phone }, 'Tool chamada');
 
     // 1. Checa permissão ANTES de executar
-    const perm = checkPermission(name, args, context);
+    const perm = await checkPermission(name, args, context);
 
     if (!perm.allowed) {
         logger.warn({ tool: name, role: context.role, phone: context.phone, reason: perm.reason }, 'Tool bloqueada por permissão');

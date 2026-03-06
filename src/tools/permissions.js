@@ -1,17 +1,28 @@
 const path = require('path');
+const { loadConfig } = require('../config');
 
 const ROLE_MASTER = 'master';
 
 /**
+ * Tools que NUNCA podem ser liberadas para users, independente do config.
+ * Segurança: execução de comandos e cron podem causar dano irreversível.
+ */
+const NEVER_ALLOW_FOR_USERS = new Set([
+    'executar_comando',
+    'gerenciar_cron',
+]);
+
+/**
  * Valida se a operação é permitida para o role.
- * Master pode TUDO. User tem restrições de segurança.
+ * Master pode TUDO. User tem restrições — mas o master pode liberar
+ * tools específicas via `user_allowed_tools` no config.json.
  *
  * @param {string} toolName - Nome da tool
  * @param {object} args - Argumentos da tool
  * @param {object} context - { phone, role, sender }
- * @returns {{ allowed: boolean, reason?: string }}
+ * @returns {Promise<{ allowed: boolean, reason?: string }>}
  */
-function checkPermission(toolName, args, context) {
+async function checkPermission(toolName, args, context) {
     const { role, phone } = context;
 
     // Master pode TUDO
@@ -21,28 +32,29 @@ function checkPermission(toolName, args, context) {
 
     // === USER — restrições ===
 
-    // 1. exec: PROIBIDO para users
-    if (toolName === 'executar_comando') {
+    // 1. Tools que NUNCA são liberadas para users (segurança)
+    if (NEVER_ALLOW_FOR_USERS.has(toolName)) {
         return {
             allowed: false,
             reason: 'Operação não disponível para usuários.',
         };
     }
 
-    // 2. cron: PROIBIDO para users
-    if (toolName === 'gerenciar_cron') {
-        return {
-            allowed: false,
-            reason: 'Apenas o administrador pode gerenciar tarefas agendadas.',
-        };
-    }
+    // 2. Checar se o master liberou a tool via config.json
+    const config = await loadConfig();
+    const allowedTools = config?.user_allowed_tools || [];
+    const isToolAllowed = allowedTools.includes(toolName);
 
-    // 3. acoes_whatsapp: PROIBIDO para users (só master pode fazer ações autônomas)
+    // 3. acoes_whatsapp: bloqueado por padrão, liberável via config
     if (toolName === 'acoes_whatsapp') {
-        return {
-            allowed: false,
-            reason: 'Operação não disponível para usuários.',
-        };
+        if (!isToolAllowed) {
+            return {
+                allowed: false,
+                reason: 'Operação não disponível para usuários.',
+            };
+        }
+        // Liberado pelo master via config
+        return { allowed: true };
     }
 
     // 4. file_write: user só pode escrever na sua pasta pessoal

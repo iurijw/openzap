@@ -140,10 +140,25 @@ Segurança em 3 camadas:
 |----------------------|-----------------|---------------------------------------------|
 | `executar_comando`   | Liberado (tudo) | Bloqueado sempre                             |
 | `gerenciar_cron`     | Liberado (tudo) | Bloqueado sempre                             |
-| `acoes_whatsapp`     | Liberado (tudo) | Bloqueado sempre                             |
+| `acoes_whatsapp`     | Liberado (tudo) | Bloqueado (liberável via `user_allowed_tools`)|
 | `escrever_arquivo`   | Liberado (tudo) | Só `users/{phone}/`                          |
 | `ler_arquivo`        | Liberado (tudo) | Só `config.json` e `users/{phone}/`          |
 | `listar_arquivos`    | Liberado (tudo) | Só `users/{phone}/`; bloqueado raiz e `users/` |
+
+### user_allowed_tools (permissões dinâmicas)
+
+O master pode liberar tools para o contexto de users adicionando nomes ao array `user_allowed_tools` no `config.json`:
+
+```json
+{
+    "user_allowed_tools": ["acoes_whatsapp"]
+}
+```
+
+- **Liberáveis:** `acoes_whatsapp`, `ler_arquivo`, `escrever_arquivo`, `listar_arquivos`
+- **Nunca liberáveis (segurança):** `executar_comando`, `gerenciar_cron` — bloqueio hardcoded em `permissions.js`
+
+Quando o master configura o bot para executar ações autônomas ao receber mensagens de users (ex: encaminhar mensagens de desconhecidos), ele precisa adicionar `"acoes_whatsapp"` ao `user_allowed_tools`. O sistema de prompts informa ao agente quais tools estão disponíveis no contexto atual.
 
 ### Sanitização de paths
 
