@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: openzap
+    volumes:
+      - bot_data:/data
+    env_file: .env
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  bot_data:
